@@ -14,12 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import httpx
 import jwt
 import yaml
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -83,7 +85,7 @@ async def _call(method: str, path: str, **kw: Any) -> Any:
         )
     r = await _client.request(method, path, **kw)
     if r.status_code >= 400:
-        raise RuntimeError(f"Paperclip {method} {path} -> {r.status_code} : {r.text[:300]}")
+        raise ToolError(f"Paperclip {method} {path} -> {r.status_code} : {r.text[:300]}")
     return r.json() if r.content else {}
 
 
@@ -109,7 +111,7 @@ async def _company_ids(company: str) -> list[tuple[str, str]]:
         if key in (c["id"].lower(), c["name"].lower(), str(c.get("issuePrefix", "")).lower())
     ]
     if not match:
-        raise ValueError(f"Unknown company: {company}. See the companies tool.")
+        raise ToolError(f"Unknown company: {company}. See the companies tool.")
     return match
 
 
@@ -250,7 +252,7 @@ async def _assignee(cid: str, assignee: str) -> tuple[dict[str, Any], str]:
     rows = _items(await _call("GET", f"/companies/{cid}/agents"))
     match = [a for a in rows if key in (a["id"].lower(), a["name"].lower())]
     if len(match) != 1:
-        raise ValueError(f"agent {assignee!r}: {len(match)} match(es). Agents: " + ", ".join(a["name"] for a in rows))
+        raise ToolError(f"agent {assignee!r}: {len(match)} match(es). Agents: " + ", ".join(a["name"] for a in rows))
     return {"assigneeAgentId": match[0]["id"], "assigneeUserId": None}, match[0]["name"]
 
 
@@ -277,7 +279,7 @@ async def issue_update(issue: str, ctx: Context, assignee: str = "", status: str
     if assignee:
         try:
             fields, who = await _assignee(t["companyId"], assignee)
-        except ValueError as exc:
+        except ToolError as exc:
             return f"{t.get('identifier')}: {exc}"
         body.update(fields)
         changes.append(f"assign to {who}")
@@ -302,7 +304,7 @@ async def _project_id(cid: str, project: str) -> str:
     rows = _items(await _call("GET", f"/companies/{cid}/projects"))
     match = [p for p in rows if project in (p["id"], p.get("name"))]
     if len(match) != 1:
-        raise ValueError(f"project {project!r}: {len(match)} match(es). Projects: " + ", ".join(p.get("name", "") for p in rows))
+        raise ToolError(f"project {project!r}: {len(match)} match(es). Projects: " + ", ".join(p.get("name", "") for p in rows))
     return match[0]["id"]
 
 
@@ -333,6 +335,183 @@ async def project_create(company: str, name: str, description: str = "", reposit
         body["repositoryUrls"] = [repository_url]
     p = await _call("POST", f"/companies/{cid}/projects", json=body)
     return f"Project created: {p.get('name')} [{p.get('status')}] {p.get('id')}"
+
+
+async def _agent(company: str, agent: str) -> dict[str, Any]:
+    cid, _ = (await _company_ids(company))[0]
+    key = agent.strip().lower()
+    rows = _items(await _call("GET", f"/companies/{cid}/agents"))
+    match = [a for a in rows if key in (a["id"].lower(), a["name"].lower())]
+    if len(match) != 1:
+        raise ToolError(f"agent {agent!r}: {len(match)} match(es). Agents: " + ", ".join(a["name"] for a in rows))
+    return {**match[0], "companyId": cid}
+
+
+def _since(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def _assistant_texts(log: str, keep: int = 3) -> list[str]:
+    texts = []
+    for line in log.splitlines():
+        try:
+            event = json.loads(json.loads(line).get("chunk") or "{}")
+        except (ValueError, AttributeError):
+            continue
+        if event.get("type") != "assistant":
+            continue
+        for block in (event.get("message") or {}).get("content") or []:
+            if block.get("type") == "text" and block.get("text", "").strip():
+                texts.append(block["text"].strip())
+    return texts[-keep:]
+
+
+async def runs(company: str = "", agent: str = "") -> str:
+    """Agent runs. Without `agent`: runs in progress, all companies if `company` is
+    empty. With `company` and `agent` (name or id): that agent's last 10 runs."""
+    if agent:
+        a = await _agent(company, agent)
+        rows = _items(await _call("GET", f"/companies/{a['companyId']}/heartbeat-runs", params={"agentId": a["id"], "limit": 10}))
+        return "\n".join(
+            f"{r['id']} [{r.get('status')}] {str(r.get('startedAt') or '')[:16]} {r.get('invocationSource') or ''}"
+            + (f" error: {r['error']}" if r.get("error") else "")
+            for r in rows
+        ) or f"No runs for {a['name']}."
+    out = []
+    for cid, name in await _company_ids(company):
+        for r in _items(await _call("GET", f"/companies/{cid}/live-runs")):
+            ref = ""
+            if r.get("issueId"):
+                ref = (await _call("GET", f"/issues/{r['issueId']}")).get("identifier", "")
+            out.append(
+                f"{name}: {r.get('agentName')} [{r.get('status')}] {ref} since {str(r.get('startedAt') or '')[11:16]} UTC"
+                f" · {r.get('currentStatusMessage') or ''} · run {r['id']}"
+            )
+    return "\n".join(out) or "No run in progress."
+
+
+async def run(run_id: str) -> str:
+    """Detail of a run: status, times, error and the agent's last messages."""
+    r = await _call("GET", f"/heartbeat-runs/{run_id}")
+    out = [
+        f"run {r['id']} [{r.get('status')}] {r.get('invocationSource') or ''}",
+        f"started {r.get('startedAt')} · finished {r.get('finishedAt') or '-'}",
+    ]
+    if r.get("error"):
+        out.append(f"error: {r['error']}")
+    log = (await _call("GET", f"/heartbeat-runs/{run_id}/log")).get("content") or ""
+    for text in _assistant_texts(log):
+        out.append(f"\n--- agent\n{text[:800]}")
+    return "\n".join(out)
+
+
+async def issue_history(issue: str) -> str:
+    """What happened on an issue: status changes, assignments, comments, runs."""
+    rows = sorted(
+        (a for a in _items(await _call("GET", f"/issues/{issue}/activity")) if not str(a.get("action", "")).startswith("tool_gateway.")),
+        key=lambda a: a.get("createdAt", ""),
+    )
+    return "\n".join(
+        f"{str(a.get('createdAt', ''))[:16]} {a.get('actorType')} {a.get('action')}"
+        + (f" {json.dumps(a['details'], ensure_ascii=False)[:160]}" if a.get("details") else "")
+        for a in rows[-25:]
+    ) or "No activity."
+
+
+async def spend(company: str = "", days: int = 7) -> str:
+    """Token use per agent over the last `days` days, all companies if `company`
+    is empty. Subscription runs cost 0 cents, so tokens and run counts are shown."""
+    out = []
+    for cid, name in await _company_ids(company):
+        rows = _items(await _call("GET", f"/companies/{cid}/costs/by-agent", params={"from": _since(days)}))
+        rows = [r for r in rows if r.get("inputTokens") or r.get("outputTokens")]
+        if not rows:
+            continue
+        out.append(f"## {name}")
+        for r in sorted(rows, key=lambda r: -(r.get("outputTokens") or 0)):
+            out.append(
+                f"- {r.get('agentName')}: {(r.get('subscriptionRunCount') or 0) + (r.get('apiRunCount') or 0)} runs, "
+                f"{r.get('inputTokens', 0):,} in, {r.get('cachedInputTokens', 0):,} cached, {r.get('outputTokens', 0):,} out"
+                + (f", {r['costCents'] / 100:.2f} $" if r.get("costCents") else "")
+            )
+    return "\n".join(out) or f"No usage over the last {days} days."
+
+
+async def activity(company: str, limit: int = 20) -> str:
+    """Latest events of a company: issues, comments, runs, agents."""
+    cid, _ = (await _company_ids(company))[0]
+    rows = _items(await _call("GET", f"/companies/{cid}/activity", params={"limit": limit}))
+    return "\n".join(
+        f"{str(a.get('createdAt', ''))[:16]} {a.get('actorType')} {a.get('action')} {a.get('entityType')}"
+        for a in rows
+    ) or "No activity."
+
+
+async def routines(company: str) -> str:
+    """Routines of a company: recurring tasks run by its agents."""
+    cid, _ = (await _company_ids(company))[0]
+    rows = _items(await _call("GET", f"/companies/{cid}/routines"))
+    return "\n".join(f"{r.get('title')} [{r.get('status', '')}] {r['id']}" for r in rows) or "No routines."
+
+
+async def agent_pause(company: str, agent: str) -> str:
+    """Pauses an agent. Its run in progress, if any, is cancelled."""
+    a = await _agent(company, agent)
+    await _call("POST", f"/agents/{a['id']}/pause")
+    return f"{a['name']} paused."
+
+
+async def agent_resume(company: str, agent: str, ctx: Context) -> str:
+    """Resumes a paused agent. The quota guard may pause it again while a quota
+    limit is active."""
+    a = await _agent(company, agent)
+    refused = await _confirm(ctx, f"Resume {a['name']} (status {a.get('status')})")
+    if refused:
+        return refused
+    await _call("POST", f"/agents/{a['id']}/resume")
+    return f"{a['name']} resumed."
+
+
+async def agent_wake(company: str, agent: str, reason: str = "") -> str:
+    """Wakes an agent now, without posting a comment. `reason` is shown in its run."""
+    a = await _agent(company, agent)
+    body: dict[str, Any] = {"source": "on_demand", "triggerDetail": "manual"}
+    if reason:
+        body["reason"] = reason
+    await _call("POST", f"/agents/{a['id']}/wakeup", json=body)
+    return f"{a['name']} woken."
+
+
+async def agent_unblock(company: str, agent: str, ctx: Context) -> str:
+    """Clears an agent's error state so it can run again."""
+    a = await _agent(company, agent)
+    refused = await _confirm(ctx, f"Clear the error of {a['name']}: {a.get('errorReason') or 'no reason given'}")
+    if refused:
+        return refused
+    await _call("POST", f"/agents/{a['id']}/clear-error")
+    return f"{a['name']}: error cleared."
+
+
+async def run_stop(run_id: str) -> str:
+    """Stops a run in progress. Paperclip does not wake the agent again for it."""
+    await _call("POST", f"/heartbeat-runs/{run_id}/cancel")
+    return f"Run {run_id} stopped."
+
+
+async def routine_run(routine_id: str, ctx: Context) -> str:
+    """Runs a routine now, outside its schedule. See the routines tool for ids."""
+    r = await _call("GET", f"/routines/{routine_id}")
+    refused = await _confirm(ctx, f"Run the routine now: {r.get('title')}")
+    if refused:
+        return refused
+    await _call("POST", f"/routines/{routine_id}/run", json={"source": "manual"})
+    return f"Routine started: {r.get('title')}."
+
+
+async def approval_comment(approval_id: str, text: str) -> str:
+    """Comments on an approval without deciding it."""
+    await _call("POST", f"/approvals/{approval_id}/comments", json={"body": text})
+    return f"Comment added to approval {approval_id}."
 
 
 async def approval_decision(approval_id: str, decision: str, note: str, ctx: Context) -> str:
@@ -384,10 +563,15 @@ TOOLS: dict[str, Callable[..., Any]] = {
     for f in (
         companies, attention, issues, issue, document, agents, approvals, action_requests,
         projects, issue_comment, issue_create, issue_update, project_create,
+        runs, run, issue_history, spend, activity, routines,
+        agent_pause, agent_resume, agent_wake, agent_unblock, run_stop, routine_run, approval_comment,
         approval_decision, interaction_respond, plan_confirm, action_request_decision,
     )
 }
-CONFIRMING = {"issue_update", "approval_decision", "interaction_respond", "plan_confirm", "action_request_decision"}
+CONFIRMING = {
+    "issue_update", "approval_decision", "interaction_respond", "plan_confirm", "action_request_decision",
+    "agent_resume", "agent_unblock", "routine_run",
+}
 
 
 def register(policy: dict[str, str]) -> list[str]:

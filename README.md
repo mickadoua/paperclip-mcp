@@ -25,8 +25,8 @@ set of tools, each one subject to a policy.
 | `deny` | the tool is not exposed (default for any tool missing from the file) |
 
 Decision tools (`issue_update`, `approval_decision`, `interaction_respond`,
-`plan_confirm`, `action_request_decision`) only accept `ask` or `deny`: otherwise
-the server refuses to start.
+`plan_confirm`, `action_request_decision`, `agent_resume`, `agent_unblock`,
+`routine_run`) only accept `ask` or `deny`: otherwise the server refuses to start.
 
 `issue_update_without_confirmation` in `policy.yaml` lists the `issue_update`
 changes that run directly: assignment (`assign: true`) and the listed statuses.
@@ -49,6 +49,14 @@ only thing that restricts them.
 | `issue_create` | create an issue, always unassigned, optionally in a project |
 | `issue_update` | assign an issue (agent or `me`) and/or change its status, optional comment; changes outside `issue_update_without_confirmation` ask for confirmation |
 | `projects` / `project_create` | list a company's projects, create one (optional GitHub repository) |
+| `runs` / `run` | runs in progress across companies, an agent's last runs, a run's status, error and last agent messages |
+| `issue_history` | what happened on an issue: status changes, assignments, comments, runs |
+| `spend` | tokens and runs per agent over the last days (subscription runs cost 0 cents) |
+| `activity` / `routines` | latest events of a company, its recurring routines |
+| `agent_pause` / `agent_wake` | pause an agent (cancels its run in progress), wake it without a comment |
+| `run_stop` | stop a run in progress |
+| `approval_comment` | comment on an approval without deciding it |
+| `agent_resume` / `agent_unblock` / `routine_run` | resume a paused agent, clear an agent's error, run a routine now; ask for confirmation |
 | `approval_decision` | approve or reject an approval |
 | `interaction_respond` | answer a question card |
 | `plan_confirm` | accept or reject a plan |

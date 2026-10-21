@@ -75,6 +75,13 @@ footer { margin-top: 56px; color: var(--muted); font-size: 0.9rem; }
     <tr><td><code>issue_create</code></td><td>Create an unassigned issue, optionally in a project</td></tr>
     <tr><td><code>issue_update</code><span class="tag">ask</span></td><td>Assign an issue to an agent or to yourself, change its status, with an optional comment. Assignment and safe statuses (backlog, todo, done, cancelled by default) run directly; other changes ask</td></tr>
     <tr><td><code>projects</code> · <code>project_create</code></td><td>List projects, create one</td></tr>
+    <tr><td><code>runs</code> · <code>run</code></td><td>Runs in progress, an agent's last runs, a run's error and last messages</td></tr>
+    <tr><td><code>issue_history</code></td><td>What happened on an issue</td></tr>
+    <tr><td><code>spend</code></td><td>Tokens and runs per agent over the last days</td></tr>
+    <tr><td><code>activity</code> · <code>routines</code></td><td>Latest events of a company, its routines</td></tr>
+    <tr><td><code>agent_pause</code> · <code>agent_wake</code> · <code>run_stop</code></td><td>Pause an agent, wake it, stop a run</td></tr>
+    <tr><td><code>approval_comment</code></td><td>Comment on an approval without deciding it</td></tr>
+    <tr><td><code>agent_resume</code> · <code>agent_unblock</code> · <code>routine_run</code><span class="tag">ask</span></td><td>Resume an agent, clear its error, run a routine now</td></tr>
     <tr><td><code>approval_decision</code><span class="tag">ask</span></td><td>Approve or reject an approval</td></tr>
     <tr><td><code>interaction_respond</code><span class="tag">ask</span></td><td>Answer an agent's question card</td></tr>
     <tr><td><code>plan_confirm</code><span class="tag">ask</span></td><td>Accept or reject a plan</td></tr>

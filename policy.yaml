@@ -15,6 +15,19 @@ tools:
   projects: allow
   project_create: allow
   issue_update: ask
+  runs: allow
+  run: allow
+  issue_history: allow
+  spend: allow
+  activity: allow
+  routines: allow
+  agent_pause: allow
+  agent_wake: allow
+  run_stop: allow
+  approval_comment: allow
+  agent_resume: ask
+  agent_unblock: ask
+  routine_run: ask
   approval_decision: ask
   interaction_respond: ask
   plan_confirm: deny
