@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>paperclip-mcp</title>
+<meta name="description" content="An MCP bridge to Paperclip with an allow / ask / deny policy per tool.">
+<style>
+:root {
+  --bg: #fafaf7; --fg: #1d1d1b; --muted: #5f5f5a; --line: #e2e1da;
+  --card: #ffffff; --accent: #2f5d50; --code: #f1f0ea;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151614; --fg: #ecebe6; --muted: #a3a29b; --line: #2c2d29;
+    --card: #1c1d1a; --accent: #8cc4b0; --code: #23241f; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 56px 16px 80px; }
+h1 { font-size: 2.2rem; margin: 0 0 8px; letter-spacing: -0.02em; }
+h2 { font-size: 1.15rem; margin: 48px 0 12px; }
+p { margin: 0 0 14px; }
+.lead { font-size: 1.15rem; color: var(--muted); margin-bottom: 24px; }
+a { color: var(--accent); }
+code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code);
+  padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; }
+pre code { padding: 0; background: none; }
+.modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.mode { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.mode b { display: block; font-family: ui-monospace, Menlo, monospace; color: var(--accent); margin-bottom: 4px; }
+.mode span { color: var(--muted); font-size: 0.95rem; }
+table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+td { padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td:first-child { width: 40%; padding-right: 16px; }
+.tag { font-size: 0.75rem; color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 999px; padding: 0 7px; margin-left: 6px; }
+footer { margin-top: 56px; color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>paperclip-mcp</h1>
+  <p class="lead">An MCP bridge to <a href="https://github.com/paperclipai/paperclip">Paperclip</a>.
+  Read your companies and issues, and act on what awaits a human, from any remote MCP client,
+  with a policy on every tool.</p>
+  <p><a href="https://github.com/mickadoua/paperclip-mcp">Source on GitHub</a></p>
+
+  <h2>Why</h2>
+  <p>The official <code>@paperclipai/mcp-server</code> speaks stdio and exposes everything, approvals
+  included, plus raw API access. A board token has every right on every company: this bridge exposes
+  a closed set of tools instead, and is the only thing that restricts that token.</p>
+
+  <h2>One mode per tool</h2>
+  <div class="modes">
+    <div class="mode"><b>allow</b><span>The tool runs.</span></div>
+    <div class="mode"><b>ask</b><span>The server asks you to confirm through MCP elicitation. A client that cannot ask is refused.</span></div>
+    <div class="mode"><b>deny</b><span>The tool is not exposed. Default for anything not listed.</span></div>
+  </div>
+  <p style="margin-top:14px">Decision tools only accept <code>ask</code> or <code>deny</code>; the server refuses to start otherwise.</p>
+
+  <h2>Tools</h2>
+  <table>
+    <tr><td><code>companies</code></td><td>Companies, issue prefix, id</td></tr>
+    <tr><td><code>attention</code></td><td>What awaits a human, across companies</td></tr>
+    <tr><td><code>issues</code> · <code>issue</code> · <code>document</code></td><td>Issues, detail, comments, documents, pending cards</td></tr>
+    <tr><td><code>agents</code></td><td>Agents of a company</td></tr>
+    <tr><td><code>approvals</code> · <code>action_requests</code></td><td>Pending approvals and tool actions</td></tr>
+    <tr><td><code>issue_comment</code></td><td>Comment on an issue</td></tr>
+    <tr><td><code>issue_create</code></td><td>Create an unassigned issue, optionally in a project</td></tr>
+    <tr><td><code>issue_update</code><span class="tag">ask</span></td><td>Assign an issue to an agent or to yourself, change its status, with an optional comment</td></tr>
+    <tr><td><code>projects</code> · <code>project_create</code></td><td>List projects, create one</td></tr>
+    <tr><td><code>approval_decision</code><span class="tag">ask</span></td><td>Approve or reject an approval</td></tr>
+    <tr><td><code>interaction_respond</code><span class="tag">ask</span></td><td>Answer an agent's question card</td></tr>
+    <tr><td><code>plan_confirm</code><span class="tag">ask</span></td><td>Accept or reject a plan</td></tr>
+    <tr><td><code>action_request_decision</code><span class="tag">ask</span></td><td>Authorize or decline a suspended tool action</td></tr>
+  </table>
+
+  <h2>Making an agent act</h2>
+  <p>In Paperclip, a comment only wakes the assigned agent, and an issue assigned to a user wakes nobody.
+  To hand work to an agent, <code>issue_update</code> assigns it, sets the status to <code>todo</code>
+  and adds a comment saying what to do, in a single request.</p>
+
+  <h2>Run</h2>
+<pre><code>docker build -t paperclip-mcp .
+docker run -e PAPERCLIP_API_KEY=... \
+  -e CF_ACCESS_TEAM_DOMAIN=... -e CF_ACCESS_AUD=... \
+  -v ./policy.yaml:/app/policy.yaml:ro -p 9200:9200 paperclip-mcp</code></pre>
+  <p>Every request must carry a valid Cloudflare Access JWT: a shared Docker network is not enough to
+  drive Paperclip. The MCP endpoint is <code>/mcp</code>.</p>
+
+  <footer>MIT License</footer>
+</main>
+</body>
+</html>

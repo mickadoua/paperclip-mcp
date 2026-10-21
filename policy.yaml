@@ -1,0 +1,21 @@
+# allow: runs. ask: requires your confirmation (MCP elicitation), refused if the
+# client cannot ask for it. deny or absent: tool not exposed.
+# Decision tools only accept ask or deny.
+tools:
+  companies: allow
+  attention: allow
+  issues: allow
+  issue: allow
+  document: allow
+  agents: allow
+  approvals: allow
+  action_requests: allow
+  issue_comment: allow
+  issue_create: allow
+  projects: allow
+  project_create: allow
+  issue_update: ask
+  approval_decision: ask
+  interaction_respond: ask
+  plan_confirm: deny
+  action_request_decision: deny
