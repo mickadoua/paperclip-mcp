@@ -117,11 +117,13 @@ async def _confirm(ctx: Context, summary: str) -> str | None:
     """None if the user confirmed, otherwise the reason for refusing."""
     caps = ctx.client_capabilities
     if not caps or not getattr(caps, "elicitation", None):
+        print(f"[paperclip-mcp] refused, client without elicitation: {summary!r}", flush=True)
         return (
             "Refused: this action requires your confirmation and this MCP client cannot "
             "ask for it. Do it in the Paperclip UI."
         )
     result = await ctx.elicit(f"{summary}\n\nConfirm?", Confirmation)
+    print(f"[paperclip-mcp] elicitation {result.action}: {summary!r}", flush=True)
     if result.action == "accept" and result.data and result.data.confirm:
         return None
     return "Cancelled: action not confirmed."
@@ -233,7 +235,7 @@ async def issue_comment(issue: str, text: str) -> str:
 
 
 UPDATE_STATUSES = ("todo", "in_progress", "in_review", "blocked", "done", "cancelled")
-BOARD_USER = {"me", "board"}
+BOARD_USER = {"me", "moi", "board"}
 
 
 async def _assignee(cid: str, assignee: str) -> tuple[dict[str, Any], str]:
@@ -251,7 +253,7 @@ async def _assignee(cid: str, assignee: str) -> tuple[dict[str, Any], str]:
 async def issue_update(issue: str, ctx: Context, assignee: str = "", status: str = "", comment: str = "") -> str:
     """Assigns an issue and/or changes its status, with an optional comment.
     `issue`: identifier (e.g. ABC-12) or UUID. `assignee`: name or id of an agent
-    in the issue's company, or `me` for the board user who owns the token.
+    in the issue's company, or `me` (or `moi`) for the board user who owns the token.
     `status`: todo, in_progress, in_review, blocked, done, cancelled; `blocked`
     requires a comment saying what is awaited.
     A comment only wakes the assigned agent; an issue assigned to a user wakes
