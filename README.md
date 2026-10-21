@@ -4,6 +4,10 @@ An MCP bridge to a [Paperclip](https://github.com/paperclipai/paperclip) instanc
 its companies, its issues and whatever awaits a human decision, exposed to a remote
 MCP client (claude.ai, Claude Code, any compatible client).
 
+[![48-second walkthrough](docs/demo.jpg)](https://mickadoua.github.io/paperclip-mcp/)
+
+A 48-second walkthrough is on the [project page](https://mickadoua.github.io/paperclip-mcp/).
+
 ## Why not the official MCP server
 
 `@paperclipai/mcp-server` speaks stdio and exposes everything, approvals included,
