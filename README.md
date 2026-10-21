@@ -24,6 +24,11 @@ Decision tools (`issue_update`, `approval_decision`, `interaction_respond`,
 `plan_confirm`, `action_request_decision`) only accept `ask` or `deny`: otherwise
 the server refuses to start.
 
+`issue_update_without_confirmation` in `policy.yaml` lists the `issue_update`
+changes that run directly: assignment (`assign: true`) and the listed statuses.
+Any other change asks for confirmation. Most clients cannot ask yet, so those
+changes are refused there.
+
 The Paperclip token is a board token, with every board right: this server is the
 only thing that restricts them.
 
@@ -38,7 +43,7 @@ only thing that restricts them.
 | `approvals` / `action_requests` | pending approvals and tool actions |
 | `issue_comment` | comment on an issue |
 | `issue_create` | create an issue, always unassigned, optionally in a project |
-| `issue_update` | assign an issue (agent or `me`) and/or change its status, optional comment; asks for confirmation |
+| `issue_update` | assign an issue (agent or `me`) and/or change its status, optional comment; changes outside `issue_update_without_confirmation` ask for confirmation |
 | `projects` / `project_create` | list a company's projects, create one (optional GitHub repository) |
 | `approval_decision` | approve or reject an approval |
 | `interaction_respond` | answer a question card |

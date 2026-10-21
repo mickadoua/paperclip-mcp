@@ -19,3 +19,8 @@ tools:
   interaction_respond: ask
   plan_confirm: deny
   action_request_decision: deny
+
+# issue_update changes that run without confirmation; any other change asks.
+issue_update_without_confirmation:
+  assign: true
+  statuses: [backlog, todo, done, cancelled]

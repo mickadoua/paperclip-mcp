@@ -39,6 +39,7 @@ LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 
 MODES = {"allow", "ask", "deny"}
+SAFE_UPDATE: dict[str, Any] = {"assign": False, "statuses": set()}
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -64,6 +65,9 @@ def load_policy(path: str) -> dict[str, str]:
         if mode not in MODES:
             raise SystemExit(f"policy.yaml: unknown mode for {tool}: {mode!r}")
         policy[tool] = mode
+    safe = raw.get("issue_update_without_confirmation") or {}
+    SAFE_UPDATE["assign"] = bool(safe.get("assign"))
+    SAFE_UPDATE["statuses"] = set(safe.get("statuses") or [])
     return policy
 
 
@@ -234,7 +238,7 @@ async def issue_comment(issue: str, text: str) -> str:
     return f"Comment added to {issue}."
 
 
-UPDATE_STATUSES = ("todo", "in_progress", "in_review", "blocked", "done", "cancelled")
+UPDATE_STATUSES = ("backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled")
 BOARD_USER = {"me", "moi", "board"}
 
 
@@ -254,8 +258,10 @@ async def issue_update(issue: str, ctx: Context, assignee: str = "", status: str
     """Assigns an issue and/or changes its status, with an optional comment.
     `issue`: identifier (e.g. ABC-12) or UUID. `assignee`: name or id of an agent
     in the issue's company, or `me` (or `moi`) for the board user who owns the token.
-    `status`: todo, in_progress, in_review, blocked, done, cancelled; `blocked`
-    requires a comment saying what is awaited.
+    `status`: backlog, todo, in_progress, in_review, blocked, done, cancelled;
+    `blocked` requires a comment saying what is awaited.
+    Assignment and the statuses listed in policy.yaml run directly; any other
+    change asks for confirmation.
     A comment only wakes the assigned agent; an issue assigned to a user wakes
     nobody. To make an agent act: assign it, status `todo`, and a comment saying
     what to do."""
@@ -283,9 +289,11 @@ async def issue_update(issue: str, ctx: Context, assignee: str = "", status: str
     if comment:
         body["comment"] = comment
         changes.append(f"comment:\n{comment}")
-    refused = await _confirm(ctx, f"{t.get('identifier')} {t.get('title')}: " + ", ".join(changes))
-    if refused:
-        return refused
+    safe = (not assignee or SAFE_UPDATE["assign"]) and (not status or status in SAFE_UPDATE["statuses"])
+    if not safe:
+        refused = await _confirm(ctx, f"{t.get('identifier')} {t.get('title')}: " + ", ".join(changes))
+        if refused:
+            return refused
     u = await _call("PATCH", f"/issues/{t['id']}", json=body)
     return f"{u.get('identifier', t.get('identifier'))} [{u.get('status')}] updated: " + ", ".join(changes)
 
