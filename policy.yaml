@@ -26,7 +26,7 @@ tools:
   run_stop: allow
   approval_comment: allow
   agent_resume: ask
-  agent_unblock: ask
+  agent_unblock: allow
   routine_run: ask
   approval_decision: ask
   interaction_respond: ask
