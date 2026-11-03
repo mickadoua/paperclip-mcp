@@ -482,12 +482,9 @@ async def agent_wake(company: str, agent: str, reason: str = "") -> str:
     return f"{a['name']} woken."
 
 
-async def agent_unblock(company: str, agent: str, ctx: Context) -> str:
+async def agent_unblock(company: str, agent: str) -> str:
     """Clears an agent's error state so it can run again."""
     a = await _agent(company, agent)
-    refused = await _confirm(ctx, f"Clear the error of {a['name']}: {a.get('errorReason') or 'no reason given'}")
-    if refused:
-        return refused
     await _call("POST", f"/agents/{a['id']}/clear-error")
     return f"{a['name']}: error cleared."
 
@@ -570,7 +567,7 @@ TOOLS: dict[str, Callable[..., Any]] = {
 }
 CONFIRMING = {
     "issue_update", "approval_decision", "interaction_respond", "plan_confirm", "action_request_decision",
-    "agent_resume", "agent_unblock", "routine_run",
+    "agent_resume", "routine_run",
 }
 
 

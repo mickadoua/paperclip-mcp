@@ -25,8 +25,8 @@ set of tools, each one subject to a policy.
 | `deny` | the tool is not exposed (default for any tool missing from the file) |
 
 Decision tools (`issue_update`, `approval_decision`, `interaction_respond`,
-`plan_confirm`, `action_request_decision`, `agent_resume`, `agent_unblock`,
-`routine_run`) only accept `ask` or `deny`: otherwise the server refuses to start.
+`plan_confirm`, `action_request_decision`, `agent_resume`, `routine_run`) only
+accept `ask` or `deny`: otherwise the server refuses to start.
 
 `issue_update_without_confirmation` in `policy.yaml` lists the `issue_update`
 changes that run directly: assignment (`assign: true`) and the listed statuses.
@@ -54,9 +54,10 @@ only thing that restricts them.
 | `spend` | tokens and runs per agent over the last days (subscription runs cost 0 cents) |
 | `activity` / `routines` | latest events of a company, its recurring routines |
 | `agent_pause` / `agent_wake` | pause an agent (cancels its run in progress), wake it without a comment |
+| `agent_unblock` | clear an agent's error so it can run again |
 | `run_stop` | stop a run in progress |
 | `approval_comment` | comment on an approval without deciding it |
-| `agent_resume` / `agent_unblock` / `routine_run` | resume a paused agent, clear an agent's error, run a routine now; ask for confirmation |
+| `agent_resume` / `routine_run` | resume a paused agent, run a routine now; ask for confirmation |
 | `approval_decision` | approve or reject an approval |
 | `interaction_respond` | answer a question card |
 | `plan_confirm` | accept or reject a plan |
