@@ -62,6 +62,33 @@ only thing that restricts them.
 | `interaction_respond` | answer a question card |
 | `plan_confirm` | accept or reject a plan |
 | `action_request_decision` | authorize or decline a suspended tool action |
+| `sessions` | Claude Code sessions outside Paperclip (CLI, desktop...) seen in the last minutes, fed by a hook |
+
+## Claude Code sessions outside Paperclip
+
+`hooks/qg-ping.py` is a Claude Code hook that tells the bridge a session is alive:
+session id, working folder name, event, tool name, host, entry point. Never the
+prompt, the tool input or a file. It answers at once and posts from a detached
+process, so an unreachable bridge never slows Claude Code down. The bridge keeps
+the sessions in memory for `SESSIONS_TTL` seconds (default 1800) and `sessions`
+lists them.
+
+On each machine:
+
+1. Copy `hooks/qg-ping.py` to `~/.claude/hooks/`.
+2. Merge `hooks/settings.example.json` into `~/.claude/settings.json`.
+3. Create `~/.config/qg-paperclip.env` (`chmod 600`):
+   ```
+   QG_URL=https://<bridge hostname>/sessions/event
+   CF_ACCESS_CLIENT_ID=...
+   CF_ACCESS_CLIENT_SECRET=...
+   QG_TOKEN=...
+   ```
+
+The route sits behind the same Cloudflare Access check as `/mcp`: create an Access
+service token and add a Service Auth policy for it on the bridge application.
+`QG_TOKEN` must equal the bridge's `SESSIONS_INGEST_TOKEN`; when that variable is
+set, events without it are refused.
 
 In Paperclip, a comment only wakes the assigned agent, and an issue assigned to a
 user wakes nobody. To make an agent act, `issue_update` assigns it, sets the status
@@ -77,6 +104,8 @@ to `todo` and adds a comment saying what to do.
 | `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | Cloudflare Access JWT validation, required |
 | `MCP_ALLOWED_HOSTS` | public hostname, otherwise the SDK answers 421 |
 | `MCP_INSECURE_NO_AUTH=1` | local test without Cloudflare only |
+| `SESSIONS_INGEST_TOKEN` | shared secret the session hook sends (`X-QG-Token`), recommended |
+| `SESSIONS_TTL` | seconds a silent session stays listed, default 1800 |
 
 Without `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD`, the server refuses to start.
 

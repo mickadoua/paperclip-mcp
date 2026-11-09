@@ -11,9 +11,11 @@ the action never runs without an explicit yes.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -36,6 +38,8 @@ CF_TEAM = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "").strip().rstrip("/")
 CF_AUD = os.environ.get("CF_ACCESS_AUD", "").strip()
 ALLOWED_HOSTS = os.environ.get("MCP_ALLOWED_HOSTS", "")
 ALLOWED_ORIGINS = os.environ.get("MCP_ALLOWED_ORIGINS", "")
+SESSIONS_TOKEN = os.environ.get("SESSIONS_INGEST_TOKEN", "")
+SESSIONS_TTL = int(os.environ.get("SESSIONS_TTL", "1800"))
 
 LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
@@ -555,6 +559,72 @@ async def action_request_decision(request_id: str, approve: bool, ctx: Context) 
     return f"Action {request_id}: {'authorized' if approve else 'declined'}."
 
 
+# Claude Code sessions outside Paperclip, fed by a hook on each machine (hooks/qg-ping.py).
+# In memory only: lost on restart, rebuilt by the next hook events.
+SESSIONS: dict[str, dict[str, Any]] = {}
+ACTIVE_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStop"}
+SESSIONS_MAX = 200
+
+
+def _clip(value: Any, limit: int = 80) -> str:
+    return str(value or "").replace("\n", " ").strip()[:limit]
+
+
+def _prune_sessions(now: float) -> None:
+    for sid, s in list(SESSIONS.items()):
+        if now - s["seen"] > SESSIONS_TTL or (s["status"] == "ended" and now - s["seen"] > 120):
+            del SESSIONS[sid]
+
+
+@mcp.custom_route("/sessions/event", methods=["POST"])
+async def session_event(request: Any) -> Any:
+    """One Claude Code hook event. Keeps only the session id, project folder name,
+    event, tool name, host and entry point: never the prompt or the tool input."""
+    if SESSIONS_TOKEN and not hmac.compare_digest(request.headers.get("x-qg-token", ""), SESSIONS_TOKEN):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    sid = _clip(body.get("session_id"), 100) if isinstance(body, dict) else ""
+    if not sid:
+        return JSONResponse({"error": "session_id missing"}, status_code=400)
+    now = time.time()
+    _prune_sessions(now)
+    if sid not in SESSIONS and len(SESSIONS) >= SESSIONS_MAX:
+        return JSONResponse({"error": "too many sessions"}, status_code=429)
+    event = _clip(body.get("hook_event_name"), 40)
+    cwd = _clip(body.get("cwd"), 300).rstrip("/")
+    s = SESSIONS.setdefault(sid, {"started": now, "tool": ""})
+    s.update(
+        seen=now,
+        project=cwd.rsplit("/", 1)[-1] or s.get("project") or "?",
+        host=_clip(body.get("host"), 40) or s.get("host") or "?",
+        via=_clip(body.get("entrypoint"), 30) or s.get("via") or "?",
+        status="ended" if event == "SessionEnd" else "active" if event in ACTIVE_EVENTS else "idle",
+    )
+    if event == "PreToolUse":
+        s["tool"] = _clip(body.get("tool_name"), 60)
+    elif event in ("Stop", "SessionStart", "SessionEnd"):
+        s["tool"] = ""
+    return JSONResponse({"ok": True})
+
+
+async def sessions() -> str:
+    """Claude Code sessions outside Paperclip (CLI, desktop...), seen in the last
+    minutes: id, status (active, idle, ended), project, current tool, host, entry point."""
+    now = time.time()
+    _prune_sessions(now)
+    rows = sorted(SESSIONS.items(), key=lambda kv: -kv[1]["seen"])
+    if not rows:
+        return "No session."
+    return "\n".join(
+        f"{sid[:8]} [{s['status']}] {s['project']} · tool={s['tool'] or '-'} · host={s['host']} "
+        f"· via={s['via']} · seen={int(now - s['seen'])}s · up={int(now - s['started'])}s"
+        for sid, s in rows
+    )
+
+
 TOOLS: dict[str, Callable[..., Any]] = {
     f.__name__: f
     for f in (
@@ -563,6 +633,7 @@ TOOLS: dict[str, Callable[..., Any]] = {
         runs, run, issue_history, spend, activity, routines,
         agent_pause, agent_resume, agent_wake, agent_unblock, run_stop, routine_run, approval_comment,
         approval_decision, interaction_respond, plan_confirm, action_request_decision,
+        sessions,
     )
 }
 CONFIRMING = {

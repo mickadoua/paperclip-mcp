@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/qg-ping.py" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/qg-ping.py" }] }],
+    "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/qg-ping.py" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/qg-ping.py" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/qg-ping.py" }] }]
+  }
+}
