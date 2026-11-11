@@ -63,6 +63,7 @@ only thing that restricts them.
 | `plan_confirm` | accept or reject a plan |
 | `action_request_decision` | authorize or decline a suspended tool action |
 | `sessions` | Claude Code sessions outside Paperclip (CLI, desktop...) seen in the last minutes, fed by a hook |
+| `nas` | state of the machine that hosts Paperclip: CPU, load, memory, ZFS pools, disk space, Docker containers; read-only |
 
 ## Claude Code sessions outside Paperclip
 
@@ -90,6 +91,60 @@ service token and add a Service Auth policy for it on the bridge application.
 `QG_TOKEN` must equal the bridge's `SESSIONS_INGEST_TOKEN`; when that variable is
 set, events without it are refused.
 
+## Host state
+
+`nas` describes the machine the bridge runs on. It never writes and never calls
+Paperclip:
+
+```
+host name=nas cpu=12% cores=4 load=0.42,0.38,0.35 mem=5.6/15.5GiB mem_pct=36% arc=6.0GiB temp=44C uptime=12d4h
+pool tank [ONLINE]
+disk tank used=2.4TiB free=1.2TiB total=3.6TiB pct=67%
+containers running=18 total=20 unhealthy=0 source=docker
+container paperclip [running] healthy · Up 3 days · stack=paperclip · image=ghcr.io/paperclipai/paperclip:latest
+```
+
+- **Host line**: `/proc` of the host, which a container sees as is. No mount and no
+  privilege needed. `mem` leaves out the ZFS cache, reported as `arc`.
+- **Pools**: ZFS pool states from `/proc/spl/kstat/zfs`, when the host runs ZFS.
+- **Disks**: `statvfs` on each path of `NAS_DISK_PATHS`. To measure a volume, mount
+  any folder of it read-only in the bridge container, an empty one is enough. On ZFS
+  `statvfs` describes one dataset: `free` is the pool's free space, `used` only what
+  that dataset holds. For the pool's fill rate, add its usable size after `@`
+  (USED + AVAIL of its root dataset in `zfs list`): `tank=/probe/tank@7.2T`.
+- **Containers**: one `GET /containers/json?all=1` on Docker, through the first of
+  these that is set. Without any, the line says `source=none`.
+
+| Source | Setting | What the bridge can reach |
+|---|---|---|
+| a socket proxy that only lets the list through, recommended | `NAS_DOCKER_URL=http://dockerproxy:2375` | the container list, nothing else |
+| the Docker socket mounted in the bridge | `NAS_DOCKER_SOCKET=/var/run/docker.sock` | the whole Docker API, so the host: avoid it on a bridge reachable from outside. A `:ro` mount does not restrict the API |
+| Portainer | `PORTAINER_URL`, `PORTAINER_API_KEY` | whatever the key's user can do in Portainer |
+
+A proxy limited to the list, here [wollomatic/socket-proxy](https://github.com/wollomatic/socket-proxy),
+on a network shared with the bridge only:
+
+```yaml
+services:
+  dockerproxy:
+    image: wollomatic/socket-proxy:<version>
+    restart: unless-stopped
+    user: "65534:<docker group id>"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    command:
+      - '-listenip=0.0.0.0'
+      - '-allowfrom=paperclip-mcp'
+      - '-allowGET=/containers/json'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [dockerproxy]
+networks:
+  dockerproxy:
+    internal: true
+```
+
 In Paperclip, a comment only wakes the assigned agent, and an issue assigned to a
 user wakes nobody. To make an agent act, `issue_update` assigns it, sets the status
 to `todo` and adds a comment saying what to do.
@@ -106,6 +161,11 @@ to `todo` and adds a comment saying what to do.
 | `MCP_INSECURE_NO_AUTH=1` | local test without Cloudflare only |
 | `SESSIONS_INGEST_TOKEN` | shared secret the session hook sends (`X-QG-Token`), recommended |
 | `SESSIONS_TTL` | seconds a silent session stays listed, default 1800 |
+| `NAS_NAME` | name shown for the host, default `nas` |
+| `NAS_DISK_PATHS` | paths measured by `nas`: `label=path`, comma-separated, optional `@size`; default `docker=/` |
+| `NAS_DOCKER_URL` / `NAS_DOCKER_SOCKET` | Docker API for the container list: an HTTP address (socket proxy) or a socket path |
+| `PORTAINER_URL` / `PORTAINER_API_KEY` | container list through Portainer instead; `PORTAINER_ENDPOINT_ID` (default: every Docker environment), `PORTAINER_INSECURE_TLS=1` for a self-signed certificate |
+| `NAS_PROC` / `NAS_SYS` | where to read the host's `/proc` and `/sys`, default `/proc` and `/sys` |
 
 Without `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD`, the server refuses to start.
 

@@ -11,10 +11,12 @@ the action never runs without an explicit yes.
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -40,6 +42,17 @@ ALLOWED_HOSTS = os.environ.get("MCP_ALLOWED_HOSTS", "")
 ALLOWED_ORIGINS = os.environ.get("MCP_ALLOWED_ORIGINS", "")
 SESSIONS_TOKEN = os.environ.get("SESSIONS_INGEST_TOKEN", "")
 SESSIONS_TTL = int(os.environ.get("SESSIONS_TTL", "1800"))
+
+NAS_NAME = os.environ.get("NAS_NAME", "nas").strip().replace(" ", "_") or "nas"
+NAS_DISK_PATHS = os.environ.get("NAS_DISK_PATHS", "docker=/")
+NAS_DOCKER_URL = os.environ.get("NAS_DOCKER_URL", "").strip().rstrip("/")
+NAS_DOCKER_SOCKET = os.environ.get("NAS_DOCKER_SOCKET", "").strip()
+PORTAINER_URL = os.environ.get("PORTAINER_URL", "").strip().rstrip("/")
+PORTAINER_KEY = os.environ.get("PORTAINER_API_KEY", "")
+PORTAINER_ENDPOINT = os.environ.get("PORTAINER_ENDPOINT_ID", "")
+PORTAINER_INSECURE = os.environ.get("PORTAINER_INSECURE_TLS") == "1"
+NAS_PROC = os.environ.get("NAS_PROC", "/proc").rstrip("/")
+NAS_SYS = os.environ.get("NAS_SYS", "/sys").rstrip("/")
 
 LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
@@ -625,6 +638,195 @@ async def sessions() -> str:
     )
 
 
+# State of the machine that hosts Paperclip, for a dashboard. Read-only and without a
+# Paperclip call: the host's /proc and /sys as a container sees them, statvfs on the
+# given paths, and one GET on Docker for the container list.
+CPU_SENSORS = {"coretemp", "k10temp", "zenpower", "cpu_thermal"}
+CPU_ZONES = {"x86_pkg_temp", "cpu-thermal", "cpu_thermal"}
+SIZE_UNITS = {"": 0, "K": 1, "M": 2, "G": 3, "T": 4, "P": 5}
+
+
+def _read(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _ls(path: str) -> list[str]:
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return []
+
+
+def _size(n: float) -> str:
+    unit = "B"
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if n < 1024 or unit == "PiB":
+            break
+        n /= 1024
+    return f"{n:.0f}{unit}" if unit in ("B", "KiB", "MiB") else f"{n:.1f}{unit}"
+
+
+def _parse_size(raw: str) -> float:
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([KMGTP]?)i?B?", raw.strip(), re.IGNORECASE)
+    return float(m.group(1)) * 1024 ** SIZE_UNITS[m.group(2).upper()] if m else 0.0
+
+
+def _cpu_times() -> tuple[int, int]:
+    """(total, idle) jiffies of the host since boot."""
+    fields = _read(f"{NAS_PROC}/stat").split("\n", 1)[0].split()
+    if len(fields) < 6 or fields[0] != "cpu":
+        return 0, 0
+    vals = [int(v) for v in fields[1:9]]
+    return sum(vals), vals[3] + vals[4]
+
+
+def _cpu_temp() -> float | None:
+    temps = []
+    hwmon = f"{NAS_SYS}/class/hwmon"
+    for hw in _ls(hwmon):
+        if _read(f"{hwmon}/{hw}/name").strip() in CPU_SENSORS:
+            temps += [_read(f"{hwmon}/{hw}/{f}") for f in _ls(f"{hwmon}/{hw}") if re.fullmatch(r"temp\d+_input", f)]
+    if not temps:
+        thermal = f"{NAS_SYS}/class/thermal"
+        temps = [_read(f"{thermal}/{z}/temp") for z in _ls(thermal) if _read(f"{thermal}/{z}/type").strip() in CPU_ZONES]
+    values = [int(t) / 1000 for t in (t.strip() for t in temps) if t.isdigit()]
+    return max(values) if values else None
+
+
+async def _host_line() -> str:
+    total0, idle0 = _cpu_times()
+    await asyncio.sleep(0.25)
+    total1, idle1 = _cpu_times()
+    out = [f"host name={NAS_NAME}"]
+    if total1 > total0:
+        out.append(f"cpu={100 * (1 - (idle1 - idle0) / (total1 - total0)):.0f}%")
+    cores = len(re.findall(r"^cpu\d+ ", _read(f"{NAS_PROC}/stat"), re.MULTILINE))
+    if cores:
+        out.append(f"cores={cores}")
+    load = _read(f"{NAS_PROC}/loadavg").split()[:3]
+    if len(load) == 3:
+        out.append("load=" + ",".join(load))
+    mem = {}
+    for line in _read(f"{NAS_PROC}/meminfo").splitlines():
+        key, _, rest = line.partition(":")
+        if rest.split()[:1] and rest.split()[0].isdigit():
+            mem[key] = int(rest.split()[0]) * 1024
+    if mem.get("MemTotal"):
+        total = mem["MemTotal"]
+        # The ZFS cache (ARC) gives its memory back on demand but Linux counts it as used.
+        arc = next(
+            (int(p[2]) for p in (ln.split() for ln in _read(f"{NAS_PROC}/spl/kstat/zfs/arcstats").splitlines())
+             if len(p) == 3 and p[0] == "size" and p[2].isdigit()),
+            0,
+        )
+        used = max(total - mem.get("MemAvailable", mem.get("MemFree", 0)) - arc, 0)
+        out.append(f"mem={used / 2**30:.1f}/{total / 2**30:.1f}GiB mem_pct={100 * used / total:.0f}%")
+        if arc:
+            out.append(f"arc={arc / 2**30:.1f}GiB")
+        if mem.get("SwapTotal"):
+            out.append(f"swap={(mem['SwapTotal'] - mem.get('SwapFree', 0)) / 2**30:.1f}/{mem['SwapTotal'] / 2**30:.1f}GiB")
+    temp = _cpu_temp()
+    if temp is not None:
+        out.append(f"temp={temp:.0f}C")
+    up = _read(f"{NAS_PROC}/uptime").split()[:1]
+    if up:
+        s = int(float(up[0]))
+        out.append(f"uptime={s // 86400}d{s % 86400 // 3600}h" if s >= 86400 else f"uptime={s // 3600}h{s % 3600 // 60}m")
+    return " ".join(out)
+
+
+def _pool_lines() -> list[str]:
+    base = f"{NAS_PROC}/spl/kstat/zfs"
+    states = ((name, _read(f"{base}/{name}/state").strip()) for name in _ls(base))
+    return [f"pool {name} [{state}]" for name, state in states if state]
+
+
+def _disk_lines() -> list[str]:
+    out = []
+    for raw in _split(NAS_DISK_PATHS):
+        label, _, rest = raw.rpartition("=")
+        path, _, size = rest.partition("@")
+        label = re.sub(r"\s+", "_", label.strip() or path.rstrip("/").rsplit("/", 1)[-1] or "root")
+        try:
+            st = os.statvfs(path)
+        except OSError as exc:
+            out.append(f"disk {label} error={exc.strerror or 'unreadable'}")
+            continue
+        free = st.f_bavail * st.f_frsize
+        # With "@size" the path only gives the free space: on ZFS, statvfs counts what
+        # one dataset uses, not the pool.
+        used = max(_parse_size(size) - free, 0) if _parse_size(size) else (st.f_blocks - st.f_bfree) * st.f_frsize
+        pct = 100 * used / (used + free) if used + free else 0
+        out.append(f"disk {label} used={_size(used)} free={_size(free)} total={_size(used + free)} pct={pct:.0f}%")
+    return out
+
+
+async def _containers() -> tuple[list[dict[str, Any]], str]:
+    """Containers as Docker lists them and where the list comes from: one GET per
+    Docker host, never a write."""
+    path, params = "/containers/json", {"all": "1"}
+    if NAS_DOCKER_URL or NAS_DOCKER_SOCKET:
+        transport = None if NAS_DOCKER_URL else httpx.AsyncHTTPTransport(uds=NAS_DOCKER_SOCKET)
+        async with httpx.AsyncClient(base_url=NAS_DOCKER_URL or "http://docker", transport=transport, timeout=10) as c:
+            r = await c.get(path, params=params)
+            r.raise_for_status()
+            return r.json(), "docker"
+    if PORTAINER_URL:
+        async with httpx.AsyncClient(
+            base_url=f"{PORTAINER_URL}/api", headers={"X-API-Key": PORTAINER_KEY}, verify=not PORTAINER_INSECURE, timeout=10
+        ) as c:
+            ids = _split(PORTAINER_ENDPOINT)
+            if not ids:
+                r = await c.get("/endpoints")
+                r.raise_for_status()
+                ids = [str(e["Id"]) for e in r.json() if e.get("Type") in (1, 2, 4)]
+            rows: list[dict[str, Any]] = []
+            for eid in ids:
+                r = await c.get(f"/endpoints/{eid}/docker{path}", params=params)
+                r.raise_for_status()
+                rows += r.json()
+            return rows, "portainer"
+    return [], ""
+
+
+async def _container_lines() -> list[str]:
+    try:
+        rows, source = await _containers()
+    except Exception as exc:  # the host lines must come out even when Docker does not answer
+        return [f"containers error={_clip((str(exc) or type(exc).__name__).splitlines()[0], 160)}"]
+    if not source:
+        return ["containers source=none (set NAS_DOCKER_URL, NAS_DOCKER_SOCKET or PORTAINER_URL)"]
+    items = []
+    for r in rows:
+        status = _clip(r.get("Status"), 60)
+        health = re.search(r"\((healthy|unhealthy|health: starting)\)", status)
+        items.append((
+            _clip((r.get("Labels") or {}).get("com.docker.compose.project"), 40).replace(" ", "_") or "-",
+            _clip((r.get("Names") or [str(r.get("Id", "?"))[:12]])[0].lstrip("/"), 60).replace(" ", "_"),
+            _clip(r.get("State"), 20) or "unknown",
+            health.group(1).replace("health: ", "") if health else "-",
+            status.replace(health.group(0), "").strip() if health else status,
+            _clip(r.get("Image"), 80),
+        ))
+    items.sort()
+    running = sum(1 for i in items if i[2] == "running")
+    unhealthy = sum(1 for i in items if i[3] == "unhealthy")
+    return [f"containers running={running} total={len(items)} unhealthy={unhealthy} source={source}"] + [
+        f"container {name} [{state}] {health} · {status} · stack={stack} · image={image}"
+        for stack, name, state, health, status, image in items
+    ]
+
+
+async def nas() -> str:
+    """State of the machine that hosts Paperclip, read-only: CPU, load, memory,
+    ZFS pools, disk space and the Docker containers with their state."""
+    return "\n".join([await _host_line(), *_pool_lines(), *_disk_lines(), *(await _container_lines())])
+
+
 TOOLS: dict[str, Callable[..., Any]] = {
     f.__name__: f
     for f in (
@@ -633,7 +835,7 @@ TOOLS: dict[str, Callable[..., Any]] = {
         runs, run, issue_history, spend, activity, routines,
         agent_pause, agent_resume, agent_wake, agent_unblock, run_stop, routine_run, approval_comment,
         approval_decision, interaction_respond, plan_confirm, action_request_decision,
-        sessions,
+        sessions, nas,
     )
 }
 CONFIRMING = {

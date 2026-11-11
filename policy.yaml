@@ -33,6 +33,7 @@ tools:
   plan_confirm: deny
   action_request_decision: deny
   sessions: allow
+  nas: allow
 
 # issue_update changes that run without confirmation; any other change asks.
 issue_update_without_confirmation:
