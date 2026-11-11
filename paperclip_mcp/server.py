@@ -169,9 +169,10 @@ async def attention(company: str = "") -> str:
             continue
         out.append(f"## {name} ({len(items)})")
         for i in items:
-            issue = i.get("relatedIssue") or {}
-            ref = issue.get("identifier") or ""
-            title = issue.get("title") or (i.get("subject") or {}).get("title") or ""
+            # A review or a blocker carries its issue as the subject, with no related issue.
+            issue, subject = i.get("relatedIssue") or {}, i.get("subject") or {}
+            ref = issue.get("identifier") or subject.get("identifier") or ""
+            title = issue.get("title") or subject.get("title") or ""
             out.append(f"- [{i.get('sourceKind')}] {ref} {title} — {i.get('whyNow', '')}")
     return "\n".join(out) or "Nothing pending."
 
