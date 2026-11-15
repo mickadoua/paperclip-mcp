@@ -64,6 +64,7 @@ only thing that restricts them.
 | `action_request_decision` | authorize or decline a suspended tool action |
 | `sessions` | Claude Code sessions outside Paperclip (CLI, desktop...) seen in the last minutes, fed by a hook |
 | `nas` | state of the machine that hosts Paperclip: CPU, load, memory, ZFS pools, disk space, Docker containers; read-only |
+| `dependencies` | what waits on what, across companies: blocked issues, the issues they wait on, who holds each one and who must unblock it; read-only |
 
 ## Claude Code sessions outside Paperclip
 
@@ -90,6 +91,24 @@ The route sits behind the same Cloudflare Access check as `/mcp`: create an Acce
 service token and add a Service Auth policy for it on the bridge application.
 `QG_TOKEN` must equal the bridge's `SESSIONS_INGEST_TOKEN`; when that variable is
 set, events without it are refused.
+
+## Dependencies
+
+`dependencies` lists, per company, the open issues that are blocked, wait on other
+issues or are assigned to a user, plus the issues they wait on:
+
+```
+## DM-Consulting (3)
+DMC-482 [blocked] by=Sacha after=DMC-474 waits=- since=2026-11-09 · template-site : recopier les modèles légaux validés
+DMC-474 [in_review] by=user after=- waits=- since=2026-11-12 · Modèles de textes légaux et de fiche store
+DMC-110 [blocked] by=Sacha after=- waits=board since=2026-11-02 · Brancher l'API Google Search Console
+  awaited: Créer la clé dans la console Google
+```
+
+`by` is the assignee (an agent's name, `user`, or `-`), `after` the issues it waits
+on, `waits` who must unblock it (`board`, `user`, an agent's name, or `-`), `since`
+the day it got blocked, or last changed when it is not blocked. An issue that blocks
+another one is listed even when it is closed, so every `after` has its own line.
 
 ## Host state
 

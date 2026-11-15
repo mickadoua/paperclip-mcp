@@ -828,6 +828,65 @@ async def nas() -> str:
     return "\n".join([await _host_line(), *_pool_lines(), *_disk_lines(), *(await _container_lines())])
 
 
+# What waits on what, for a dashboard: read-only, one issue list per company.
+OPEN_STATUSES = "todo,in_progress,in_review,blocked"
+
+
+def _holder(agent_id: Any, user_id: Any, names: dict[str, str]) -> str:
+    if agent_id:
+        return (names.get(agent_id) or "agent").replace(" ", "_")
+    return "user" if user_id else "-"
+
+
+async def dependencies(company: str = "") -> str:
+    """What waits on what, all companies if `company` is empty: the open issues that
+    are blocked, wait on other issues or are assigned to a user, and the issues they
+    wait on. One line per issue: `by` who holds it, `after` the issues it waits on,
+    `waits` who must unblock it, `since` the day it got blocked or last changed."""
+    out = []
+    for cid, name in await _company_ids(company):
+        names = {a["id"]: a.get("name") or "?" for a in _items(await _call("GET", f"/companies/{cid}/agents")) if a.get("id")}
+        rows = [
+            r for r in _items(await _call("GET", f"/companies/{cid}/issues", params={"status": OPEN_STATUSES, "includeBlockedBy": "true"}))
+            if r.get("id")
+        ]
+        # A Paperclip that does not know includeBlockedBy leaves the field out of the
+        # list: the blockers are then read on each blocked issue.
+        if rows and not any("blockedBy" in r for r in rows):
+            for r in [r for r in rows if r.get("status") == "blocked"][:40]:
+                r["blockedBy"] = (await _call("GET", f"/issues/{r['id']}")).get("blockedBy") or []
+        by_id = {r["id"]: r for r in rows}
+        keep: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            blockers = [b for b in r.get("blockedBy") or [] if b.get("id")]
+            if blockers or r.get("status") == "blocked" or r.get("assigneeUserId"):
+                keep[r["id"]] = r
+            for b in blockers:
+                # A blocker outside the open statuses (done, cancelled, backlog) only exists as this summary.
+                keep.setdefault(b["id"], by_id.get(b["id"], b))
+        if not keep:
+            continue
+
+        def ref(i: dict[str, Any]) -> str:
+            return i.get("identifier") or str(i["id"])[:8]
+
+        out.append(f"## {name} ({len(keep)})")
+        for i in keep.values():
+            unblock = i.get("unblockDescriptor") or {}
+            owner = unblock.get("owner")
+            waits = owner if owner == "board" else _holder(owner.get("agentId"), owner.get("userId"), names) if isinstance(owner, dict) else "-"
+            after = ",".join(ref(b) for b in i.get("blockedBy") or [] if b.get("id")) or "-"
+            since = str(i.get("blockedTransitionAt") or i.get("updatedAt") or "")[:10] or "-"
+            title = _clip(i.get("title"), 200) or ("not readable" if i.get("locked") else "")
+            out.append(
+                f"{ref(i)} [{i.get('status') or '?'}] by={_holder(i.get('assigneeAgentId'), i.get('assigneeUserId'), names)}"
+                f" after={after} waits={waits} since={since} · {title}"
+            )
+            if _clip(unblock.get("action")):
+                out.append(f"  awaited: {_clip(unblock.get('action'), 240)}")
+    return "\n".join(out) or "Nothing is blocked or waiting."
+
+
 TOOLS: dict[str, Callable[..., Any]] = {
     f.__name__: f
     for f in (
@@ -836,7 +895,7 @@ TOOLS: dict[str, Callable[..., Any]] = {
         runs, run, issue_history, spend, activity, routines,
         agent_pause, agent_resume, agent_wake, agent_unblock, run_stop, routine_run, approval_comment,
         approval_decision, interaction_respond, plan_confirm, action_request_decision,
-        sessions, nas,
+        sessions, nas, dependencies,
     )
 }
 CONFIRMING = {
