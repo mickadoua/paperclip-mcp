@@ -11,9 +11,13 @@ the action never runs without an explicit yes.
 """
 from __future__ import annotations
 
+import asyncio
+import hmac
 import json
 import logging
 import os
+import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -36,6 +40,19 @@ CF_TEAM = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "").strip().rstrip("/")
 CF_AUD = os.environ.get("CF_ACCESS_AUD", "").strip()
 ALLOWED_HOSTS = os.environ.get("MCP_ALLOWED_HOSTS", "")
 ALLOWED_ORIGINS = os.environ.get("MCP_ALLOWED_ORIGINS", "")
+SESSIONS_TOKEN = os.environ.get("SESSIONS_INGEST_TOKEN", "")
+SESSIONS_TTL = int(os.environ.get("SESSIONS_TTL", "1800"))
+
+NAS_NAME = os.environ.get("NAS_NAME", "nas").strip().replace(" ", "_") or "nas"
+NAS_DISK_PATHS = os.environ.get("NAS_DISK_PATHS", "docker=/")
+NAS_DOCKER_URL = os.environ.get("NAS_DOCKER_URL", "").strip().rstrip("/")
+NAS_DOCKER_SOCKET = os.environ.get("NAS_DOCKER_SOCKET", "").strip()
+PORTAINER_URL = os.environ.get("PORTAINER_URL", "").strip().rstrip("/")
+PORTAINER_KEY = os.environ.get("PORTAINER_API_KEY", "")
+PORTAINER_ENDPOINT = os.environ.get("PORTAINER_ENDPOINT_ID", "")
+PORTAINER_INSECURE = os.environ.get("PORTAINER_INSECURE_TLS") == "1"
+NAS_PROC = os.environ.get("NAS_PROC", "/proc").rstrip("/")
+NAS_SYS = os.environ.get("NAS_SYS", "/sys").rstrip("/")
 
 LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
@@ -152,9 +169,10 @@ async def attention(company: str = "") -> str:
             continue
         out.append(f"## {name} ({len(items)})")
         for i in items:
-            issue = i.get("relatedIssue") or {}
-            ref = issue.get("identifier") or ""
-            title = issue.get("title") or (i.get("subject") or {}).get("title") or ""
+            # A review or a blocker carries its issue as the subject, with no related issue.
+            issue, subject = i.get("relatedIssue") or {}, i.get("subject") or {}
+            ref = issue.get("identifier") or subject.get("identifier") or ""
+            title = issue.get("title") or subject.get("title") or ""
             out.append(f"- [{i.get('sourceKind')}] {ref} {title} — {i.get('whyNow', '')}")
     return "\n".join(out) or "Nothing pending."
 
@@ -555,6 +573,320 @@ async def action_request_decision(request_id: str, approve: bool, ctx: Context) 
     return f"Action {request_id}: {'authorized' if approve else 'declined'}."
 
 
+# Claude Code sessions outside Paperclip, fed by a hook on each machine (hooks/qg-ping.py).
+# In memory only: lost on restart, rebuilt by the next hook events.
+SESSIONS: dict[str, dict[str, Any]] = {}
+ACTIVE_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStop"}
+SESSIONS_MAX = 200
+
+
+def _clip(value: Any, limit: int = 80) -> str:
+    return str(value or "").replace("\n", " ").strip()[:limit]
+
+
+def _prune_sessions(now: float) -> None:
+    for sid, s in list(SESSIONS.items()):
+        if now - s["seen"] > SESSIONS_TTL or (s["status"] == "ended" and now - s["seen"] > 120):
+            del SESSIONS[sid]
+
+
+@mcp.custom_route("/sessions/event", methods=["POST"])
+async def session_event(request: Any) -> Any:
+    """One Claude Code hook event. Keeps only the session id, project folder name,
+    event, tool name, host and entry point: never the prompt or the tool input."""
+    if SESSIONS_TOKEN and not hmac.compare_digest(request.headers.get("x-qg-token", ""), SESSIONS_TOKEN):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    sid = _clip(body.get("session_id"), 100) if isinstance(body, dict) else ""
+    if not sid:
+        return JSONResponse({"error": "session_id missing"}, status_code=400)
+    now = time.time()
+    _prune_sessions(now)
+    if sid not in SESSIONS and len(SESSIONS) >= SESSIONS_MAX:
+        return JSONResponse({"error": "too many sessions"}, status_code=429)
+    event = _clip(body.get("hook_event_name"), 40)
+    cwd = _clip(body.get("cwd"), 300).rstrip("/")
+    s = SESSIONS.setdefault(sid, {"started": now, "tool": ""})
+    s.update(
+        seen=now,
+        project=cwd.rsplit("/", 1)[-1] or s.get("project") or "?",
+        host=_clip(body.get("host"), 40) or s.get("host") or "?",
+        via=_clip(body.get("entrypoint"), 30) or s.get("via") or "?",
+        status="ended" if event == "SessionEnd" else "active" if event in ACTIVE_EVENTS else "idle",
+    )
+    if event == "PreToolUse":
+        s["tool"] = _clip(body.get("tool_name"), 60)
+    elif event in ("Stop", "SessionStart", "SessionEnd"):
+        s["tool"] = ""
+    return JSONResponse({"ok": True})
+
+
+async def sessions() -> str:
+    """Claude Code sessions outside Paperclip (CLI, desktop...), seen in the last
+    minutes: id, status (active, idle, ended), project, current tool, host, entry point."""
+    now = time.time()
+    _prune_sessions(now)
+    rows = sorted(SESSIONS.items(), key=lambda kv: -kv[1]["seen"])
+    if not rows:
+        return "No session."
+    return "\n".join(
+        f"{sid[:8]} [{s['status']}] {s['project']} · tool={s['tool'] or '-'} · host={s['host']} "
+        f"· via={s['via']} · seen={int(now - s['seen'])}s · up={int(now - s['started'])}s"
+        for sid, s in rows
+    )
+
+
+# State of the machine that hosts Paperclip, for a dashboard. Read-only and without a
+# Paperclip call: the host's /proc and /sys as a container sees them, statvfs on the
+# given paths, and one GET on Docker for the container list.
+CPU_SENSORS = {"coretemp", "k10temp", "zenpower", "cpu_thermal"}
+CPU_ZONES = {"x86_pkg_temp", "cpu-thermal", "cpu_thermal"}
+SIZE_UNITS = {"": 0, "K": 1, "M": 2, "G": 3, "T": 4, "P": 5}
+
+
+def _read(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _ls(path: str) -> list[str]:
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return []
+
+
+def _size(n: float) -> str:
+    unit = "B"
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if n < 1024 or unit == "PiB":
+            break
+        n /= 1024
+    return f"{n:.0f}{unit}" if unit in ("B", "KiB", "MiB") else f"{n:.1f}{unit}"
+
+
+def _parse_size(raw: str) -> float:
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([KMGTP]?)i?B?", raw.strip(), re.IGNORECASE)
+    return float(m.group(1)) * 1024 ** SIZE_UNITS[m.group(2).upper()] if m else 0.0
+
+
+def _cpu_times() -> tuple[int, int]:
+    """(total, idle) jiffies of the host since boot."""
+    fields = _read(f"{NAS_PROC}/stat").split("\n", 1)[0].split()
+    if len(fields) < 6 or fields[0] != "cpu":
+        return 0, 0
+    vals = [int(v) for v in fields[1:9]]
+    return sum(vals), vals[3] + vals[4]
+
+
+def _cpu_temp() -> float | None:
+    temps = []
+    hwmon = f"{NAS_SYS}/class/hwmon"
+    for hw in _ls(hwmon):
+        if _read(f"{hwmon}/{hw}/name").strip() in CPU_SENSORS:
+            temps += [_read(f"{hwmon}/{hw}/{f}") for f in _ls(f"{hwmon}/{hw}") if re.fullmatch(r"temp\d+_input", f)]
+    if not temps:
+        thermal = f"{NAS_SYS}/class/thermal"
+        temps = [_read(f"{thermal}/{z}/temp") for z in _ls(thermal) if _read(f"{thermal}/{z}/type").strip() in CPU_ZONES]
+    values = [int(t) / 1000 for t in (t.strip() for t in temps) if t.isdigit()]
+    return max(values) if values else None
+
+
+async def _host_line() -> str:
+    total0, idle0 = _cpu_times()
+    await asyncio.sleep(0.25)
+    total1, idle1 = _cpu_times()
+    out = [f"host name={NAS_NAME}"]
+    if total1 > total0:
+        out.append(f"cpu={100 * (1 - (idle1 - idle0) / (total1 - total0)):.0f}%")
+    cores = len(re.findall(r"^cpu\d+ ", _read(f"{NAS_PROC}/stat"), re.MULTILINE))
+    if cores:
+        out.append(f"cores={cores}")
+    load = _read(f"{NAS_PROC}/loadavg").split()[:3]
+    if len(load) == 3:
+        out.append("load=" + ",".join(load))
+    mem = {}
+    for line in _read(f"{NAS_PROC}/meminfo").splitlines():
+        key, _, rest = line.partition(":")
+        if rest.split()[:1] and rest.split()[0].isdigit():
+            mem[key] = int(rest.split()[0]) * 1024
+    if mem.get("MemTotal"):
+        total = mem["MemTotal"]
+        # The ZFS cache (ARC) gives its memory back on demand but Linux counts it as used.
+        arc = next(
+            (int(p[2]) for p in (ln.split() for ln in _read(f"{NAS_PROC}/spl/kstat/zfs/arcstats").splitlines())
+             if len(p) == 3 and p[0] == "size" and p[2].isdigit()),
+            0,
+        )
+        used = max(total - mem.get("MemAvailable", mem.get("MemFree", 0)) - arc, 0)
+        out.append(f"mem={used / 2**30:.1f}/{total / 2**30:.1f}GiB mem_pct={100 * used / total:.0f}%")
+        if arc:
+            out.append(f"arc={arc / 2**30:.1f}GiB")
+        if mem.get("SwapTotal"):
+            out.append(f"swap={(mem['SwapTotal'] - mem.get('SwapFree', 0)) / 2**30:.1f}/{mem['SwapTotal'] / 2**30:.1f}GiB")
+    temp = _cpu_temp()
+    if temp is not None:
+        out.append(f"temp={temp:.0f}C")
+    up = _read(f"{NAS_PROC}/uptime").split()[:1]
+    if up:
+        s = int(float(up[0]))
+        out.append(f"uptime={s // 86400}d{s % 86400 // 3600}h" if s >= 86400 else f"uptime={s // 3600}h{s % 3600 // 60}m")
+    return " ".join(out)
+
+
+def _pool_lines() -> list[str]:
+    base = f"{NAS_PROC}/spl/kstat/zfs"
+    states = ((name, _read(f"{base}/{name}/state").strip()) for name in _ls(base))
+    return [f"pool {name} [{state}]" for name, state in states if state]
+
+
+def _disk_lines() -> list[str]:
+    out = []
+    for raw in _split(NAS_DISK_PATHS):
+        label, _, rest = raw.rpartition("=")
+        path, _, size = rest.partition("@")
+        label = re.sub(r"\s+", "_", label.strip() or path.rstrip("/").rsplit("/", 1)[-1] or "root")
+        try:
+            st = os.statvfs(path)
+        except OSError as exc:
+            out.append(f"disk {label} error={exc.strerror or 'unreadable'}")
+            continue
+        free = st.f_bavail * st.f_frsize
+        # With "@size" the path only gives the free space: on ZFS, statvfs counts what
+        # one dataset uses, not the pool.
+        used = max(_parse_size(size) - free, 0) if _parse_size(size) else (st.f_blocks - st.f_bfree) * st.f_frsize
+        pct = 100 * used / (used + free) if used + free else 0
+        out.append(f"disk {label} used={_size(used)} free={_size(free)} total={_size(used + free)} pct={pct:.0f}%")
+    return out
+
+
+async def _containers() -> tuple[list[dict[str, Any]], str]:
+    """Containers as Docker lists them and where the list comes from: one GET per
+    Docker host, never a write."""
+    path, params = "/containers/json", {"all": "1"}
+    if NAS_DOCKER_URL or NAS_DOCKER_SOCKET:
+        transport = None if NAS_DOCKER_URL else httpx.AsyncHTTPTransport(uds=NAS_DOCKER_SOCKET)
+        async with httpx.AsyncClient(base_url=NAS_DOCKER_URL or "http://docker", transport=transport, timeout=10) as c:
+            r = await c.get(path, params=params)
+            r.raise_for_status()
+            return r.json(), "docker"
+    if PORTAINER_URL:
+        async with httpx.AsyncClient(
+            base_url=f"{PORTAINER_URL}/api", headers={"X-API-Key": PORTAINER_KEY}, verify=not PORTAINER_INSECURE, timeout=10
+        ) as c:
+            ids = _split(PORTAINER_ENDPOINT)
+            if not ids:
+                r = await c.get("/endpoints")
+                r.raise_for_status()
+                ids = [str(e["Id"]) for e in r.json() if e.get("Type") in (1, 2, 4)]
+            rows: list[dict[str, Any]] = []
+            for eid in ids:
+                r = await c.get(f"/endpoints/{eid}/docker{path}", params=params)
+                r.raise_for_status()
+                rows += r.json()
+            return rows, "portainer"
+    return [], ""
+
+
+async def _container_lines() -> list[str]:
+    try:
+        rows, source = await _containers()
+    except Exception as exc:  # the host lines must come out even when Docker does not answer
+        return [f"containers error={_clip((str(exc) or type(exc).__name__).splitlines()[0], 160)}"]
+    if not source:
+        return ["containers source=none (set NAS_DOCKER_URL, NAS_DOCKER_SOCKET or PORTAINER_URL)"]
+    items = []
+    for r in rows:
+        status = _clip(r.get("Status"), 60)
+        health = re.search(r"\((healthy|unhealthy|health: starting)\)", status)
+        items.append((
+            _clip((r.get("Labels") or {}).get("com.docker.compose.project"), 40).replace(" ", "_") or "-",
+            _clip((r.get("Names") or [str(r.get("Id", "?"))[:12]])[0].lstrip("/"), 60).replace(" ", "_"),
+            _clip(r.get("State"), 20) or "unknown",
+            health.group(1).replace("health: ", "") if health else "-",
+            status.replace(health.group(0), "").strip() if health else status,
+            _clip(r.get("Image"), 80),
+        ))
+    items.sort()
+    running = sum(1 for i in items if i[2] == "running")
+    unhealthy = sum(1 for i in items if i[3] == "unhealthy")
+    return [f"containers running={running} total={len(items)} unhealthy={unhealthy} source={source}"] + [
+        f"container {name} [{state}] {health} · {status} · stack={stack} · image={image}"
+        for stack, name, state, health, status, image in items
+    ]
+
+
+async def nas() -> str:
+    """State of the machine that hosts Paperclip, read-only: CPU, load, memory,
+    ZFS pools, disk space and the Docker containers with their state."""
+    return "\n".join([await _host_line(), *_pool_lines(), *_disk_lines(), *(await _container_lines())])
+
+
+# What waits on what, for a dashboard: read-only, one issue list per company.
+OPEN_STATUSES = "todo,in_progress,in_review,blocked"
+
+
+def _holder(agent_id: Any, user_id: Any, names: dict[str, str]) -> str:
+    if agent_id:
+        return (names.get(agent_id) or "agent").replace(" ", "_")
+    return "user" if user_id else "-"
+
+
+async def dependencies(company: str = "") -> str:
+    """What waits on what, all companies if `company` is empty: the open issues that
+    are blocked, wait on other issues or are assigned to a user, and the issues they
+    wait on. One line per issue: `by` who holds it, `after` the issues it waits on,
+    `waits` who must unblock it, `since` the day it got blocked or last changed."""
+    out = []
+    for cid, name in await _company_ids(company):
+        names = {a["id"]: a.get("name") or "?" for a in _items(await _call("GET", f"/companies/{cid}/agents")) if a.get("id")}
+        rows = [
+            r for r in _items(await _call("GET", f"/companies/{cid}/issues", params={"status": OPEN_STATUSES, "includeBlockedBy": "true"}))
+            if r.get("id")
+        ]
+        # A Paperclip that does not know includeBlockedBy leaves the field out of the
+        # list: the blockers are then read on each blocked issue.
+        if rows and not any("blockedBy" in r for r in rows):
+            for r in [r for r in rows if r.get("status") == "blocked"][:40]:
+                r["blockedBy"] = (await _call("GET", f"/issues/{r['id']}")).get("blockedBy") or []
+        by_id = {r["id"]: r for r in rows}
+        keep: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            blockers = [b for b in r.get("blockedBy") or [] if b.get("id")]
+            if blockers or r.get("status") == "blocked" or r.get("assigneeUserId"):
+                keep[r["id"]] = r
+            for b in blockers:
+                # A blocker outside the open statuses (done, cancelled, backlog) only exists as this summary.
+                keep.setdefault(b["id"], by_id.get(b["id"], b))
+        if not keep:
+            continue
+
+        def ref(i: dict[str, Any]) -> str:
+            return i.get("identifier") or str(i["id"])[:8]
+
+        out.append(f"## {name} ({len(keep)})")
+        for i in keep.values():
+            unblock = i.get("unblockDescriptor") or {}
+            owner = unblock.get("owner")
+            waits = owner if owner == "board" else _holder(owner.get("agentId"), owner.get("userId"), names) if isinstance(owner, dict) else "-"
+            after = ",".join(ref(b) for b in i.get("blockedBy") or [] if b.get("id")) or "-"
+            since = str(i.get("blockedTransitionAt") or i.get("updatedAt") or "")[:10] or "-"
+            title = _clip(i.get("title"), 200) or ("not readable" if i.get("locked") else "")
+            out.append(
+                f"{ref(i)} [{i.get('status') or '?'}] by={_holder(i.get('assigneeAgentId'), i.get('assigneeUserId'), names)}"
+                f" after={after} waits={waits} since={since} · {title}"
+            )
+            if _clip(unblock.get("action")):
+                out.append(f"  awaited: {_clip(unblock.get('action'), 240)}")
+    return "\n".join(out) or "Nothing is blocked or waiting."
+
+
 TOOLS: dict[str, Callable[..., Any]] = {
     f.__name__: f
     for f in (
@@ -563,6 +895,7 @@ TOOLS: dict[str, Callable[..., Any]] = {
         runs, run, issue_history, spend, activity, routines,
         agent_pause, agent_resume, agent_wake, agent_unblock, run_stop, routine_run, approval_comment,
         approval_decision, interaction_respond, plan_confirm, action_request_decision,
+        sessions, nas, dependencies,
     )
 }
 CONFIRMING = {
