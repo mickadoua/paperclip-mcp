@@ -81,9 +81,10 @@ footer { margin-top: 56px; color: var(--muted); font-size: 0.9rem; }
     <tr><td><code>activity</code> · <code>routines</code></td><td>Latest events of a company, its routines</td></tr>
     <tr><td><code>agent_pause</code> · <code>agent_wake</code> · <code>run_stop</code></td><td>Pause an agent, wake it, stop a run</td></tr>
     <tr><td><code>approval_comment</code></td><td>Comment on an approval without deciding it</td></tr>
-    <tr><td><code>agent_resume</code> · <code>agent_unblock</code> · <code>routine_run</code><span class="tag">ask</span></td><td>Resume an agent, clear its error, run a routine now</td></tr>
+    <tr><td><code>agent_resume</code> · <code>agent_unblock</code></td><td>Resume a paused agent, clear its error</td></tr>
+    <tr><td><code>routine_run</code><span class="tag">ask</span></td><td>Run a routine now</td></tr>
     <tr><td><code>approval_decision</code><span class="tag">ask</span></td><td>Approve or reject an approval</td></tr>
-    <tr><td><code>interaction_respond</code><span class="tag">ask</span></td><td>Answer an agent's question card</td></tr>
+    <tr><td><code>interaction_respond</code></td><td>Answer an agent's question card, never an N3 or "Confirm secret binding" card</td></tr>
     <tr><td><code>plan_confirm</code><span class="tag">ask</span></td><td>Accept or reject a plan</td></tr>
     <tr><td><code>action_request_decision</code><span class="tag">ask</span></td><td>Authorize or decline a suspended tool action</td></tr>
   </table>

@@ -26,7 +26,18 @@ set of tools, each one subject to a policy.
 
 Decision tools (`issue_update`, `approval_decision`, `interaction_respond`,
 `plan_confirm`, `action_request_decision`, `agent_resume`, `routine_run`) only
-accept `ask` or `deny`: otherwise the server refuses to start.
+accept `ask` or `deny`: otherwise the server refuses to start. Two exceptions,
+`interaction_respond` and `agent_resume`, also accept `allow`: they then run
+without confirmation, and each call is logged with what it did. The client
+claude.ai cannot ask for confirmation, so in `ask` these two are always refused
+there. `policy.yaml` sets them to `allow`; set them back to `ask` and restart to
+undo.
+
+Rule of conduct for the assistant that uses `interaction_respond` (the policy
+cannot tell cards apart): it never answers an N3 card (money, legal, accounts and
+keys, existing DNS, brands and positioning, real data, first message in the
+founder's name), nor a "Confirm secret binding" card. Those stay with the founder,
+in the Paperclip UI.
 
 `issue_update_without_confirmation` in `policy.yaml` lists the `issue_update`
 changes that run directly: assignment (`assign: true`) and the listed statuses.
@@ -57,9 +68,10 @@ only thing that restricts them.
 | `agent_unblock` | clear an agent's error so it can run again |
 | `run_stop` | stop a run in progress |
 | `approval_comment` | comment on an approval without deciding it |
-| `agent_resume` / `routine_run` | resume a paused agent, run a routine now; ask for confirmation |
-| `approval_decision` | approve or reject an approval |
-| `interaction_respond` | answer a question card |
+| `agent_resume` | resume a paused agent; runs directly when the policy sets it to `allow` |
+| `routine_run` | run a routine now; asks for confirmation |
+| `approval_decision` | approve or reject an approval; asks for confirmation |
+| `interaction_respond` | answer a question card; runs directly when the policy sets it to `allow`, never on N3 or "Confirm secret binding" cards |
 | `plan_confirm` | accept or reject a plan |
 | `action_request_decision` | authorize or decline a suspended tool action |
 | `sessions` | Claude Code sessions outside Paperclip (CLI, desktop...) seen in the last minutes, fed by a hook |
