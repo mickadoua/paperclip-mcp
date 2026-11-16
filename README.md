@@ -99,15 +99,16 @@ issues or are assigned to a user, plus the issues they wait on:
 
 ```
 ## DM-Consulting (3)
-DMC-482 [blocked] by=Sacha after=DMC-474 waits=- since=2026-11-09 · template-site : recopier les modèles légaux validés
-DMC-474 [in_review] by=user after=- waits=- since=2026-11-12 · Modèles de textes légaux et de fiche store
-DMC-110 [blocked] by=Sacha after=- waits=board since=2026-11-02 · Brancher l'API Google Search Console
+DMC-482 [blocked] by=Sacha after=DMC-474 waits=- since=2026-11-09 project=Templates_(template-site,_template-android) · template-site : recopier les modèles légaux validés
+DMC-474 [in_review] by=user after=- waits=- since=2026-11-12 project=Templates_(template-site,_template-android) · Modèles de textes légaux et de fiche store
+DMC-110 [blocked] by=Sacha after=- waits=board since=2026-11-02 project=- · Brancher l'API Google Search Console
   awaited: Créer la clé dans la console Google
 ```
 
 `by` is the assignee (an agent's name, `user`, or `-`), `after` the issues it waits
 on, `waits` who must unblock it (`board`, `user`, an agent's name, or `-`), `since`
-the day it got blocked, or last changed when it is not blocked. An issue that blocks
+the day it got blocked, or last changed when it is not blocked, `project` the name of
+the issue's project with spaces turned into `_` (`-` when it has none). An issue that blocks
 another one is listed even when it is closed, so every `after` has its own line.
 
 ## Host state

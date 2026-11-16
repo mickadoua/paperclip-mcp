@@ -842,7 +842,8 @@ async def dependencies(company: str = "") -> str:
     """What waits on what, all companies if `company` is empty: the open issues that
     are blocked, wait on other issues or are assigned to a user, and the issues they
     wait on. One line per issue: `by` who holds it, `after` the issues it waits on,
-    `waits` who must unblock it, `since` the day it got blocked or last changed."""
+    `waits` who must unblock it, `since` the day it got blocked or last changed,
+    `project` the issue's project name (spaces as `_`, `-` when it has none)."""
     out = []
     for cid, name in await _company_ids(company):
         names = {a["id"]: a.get("name") or "?" for a in _items(await _call("GET", f"/companies/{cid}/agents")) if a.get("id")}
@@ -866,6 +867,13 @@ async def dependencies(company: str = "") -> str:
                 keep.setdefault(b["id"], by_id.get(b["id"], b))
         if not keep:
             continue
+        projects = {p["id"]: p.get("name") or "?" for p in _items(await _call("GET", f"/companies/{cid}/projects")) if p.get("id")}
+        # A blocker summary carries no project: the closed blockers are read one by one.
+        for i in [i for i in keep.values() if "projectId" not in i][:40]:
+            try:
+                i["projectId"] = (await _call("GET", f"/issues/{i['id']}")).get("projectId")
+            except ToolError:
+                i["projectId"] = None
 
         def ref(i: dict[str, Any]) -> str:
             return i.get("identifier") or str(i["id"])[:8]
@@ -877,10 +885,11 @@ async def dependencies(company: str = "") -> str:
             waits = owner if owner == "board" else _holder(owner.get("agentId"), owner.get("userId"), names) if isinstance(owner, dict) else "-"
             after = ",".join(ref(b) for b in i.get("blockedBy") or [] if b.get("id")) or "-"
             since = str(i.get("blockedTransitionAt") or i.get("updatedAt") or "")[:10] or "-"
+            project = "_".join(_clip(projects.get(i.get("projectId") or "", "-"), 60).split()) or "-"
             title = _clip(i.get("title"), 200) or ("not readable" if i.get("locked") else "")
             out.append(
                 f"{ref(i)} [{i.get('status') or '?'}] by={_holder(i.get('assigneeAgentId'), i.get('assigneeUserId'), names)}"
-                f" after={after} waits={waits} since={since} · {title}"
+                f" after={after} waits={waits} since={since} project={project} · {title}"
             )
             if _clip(unblock.get("action")):
                 out.append(f"  awaited: {_clip(unblock.get('action'), 240)}")
