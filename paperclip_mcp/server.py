@@ -136,8 +136,12 @@ class Confirmation(BaseModel):
     confirm: bool
 
 
-async def _confirm(ctx: Context, summary: str) -> str | None:
-    """None if the user confirmed, otherwise the reason for refusing."""
+async def _confirm(ctx: Context, summary: str, tool: str = "") -> str | None:
+    """None if the user confirmed, otherwise the reason for refusing. A tool of
+    ALLOWABLE set to allow by the policy runs without asking, logged."""
+    if tool and ACTIVE.get(tool) == "allow":
+        print(f"[paperclip-mcp] {tool} allowed by policy, no confirmation: {summary!r}", flush=True)
+        return None
     caps = ctx.client_capabilities
     if not caps or not getattr(caps, "elicitation", None):
         print(f"[paperclip-mcp] refused, client without elicitation: {summary!r}", flush=True)
@@ -483,7 +487,7 @@ async def agent_resume(company: str, agent: str, ctx: Context) -> str:
     """Resumes a paused agent. The quota guard may pause it again while a quota
     limit is active."""
     a = await _agent(company, agent)
-    refused = await _confirm(ctx, f"Resume {a['name']} (status {a.get('status')})")
+    refused = await _confirm(ctx, f"Resume {a['name']} (status {a.get('status')})", "agent_resume")
     if refused:
         return refused
     await _call("POST", f"/agents/{a['id']}/resume")
@@ -547,7 +551,10 @@ async def interaction_respond(issue: str, interaction_id: str, answers_json: str
     """Answers an agent's question card. `answers_json`: list
     [{"questionId", "optionIds": [...], "otherText"}], see the issue tool."""
     answers = json.loads(answers_json)
-    refused = await _confirm(ctx, f"Answer card {interaction_id} on {issue}:\n{json.dumps(answers, ensure_ascii=False, indent=1)}")
+    refused = await _confirm(
+        ctx, f"Answer card {interaction_id} on {issue}:\n{json.dumps(answers, ensure_ascii=False, indent=1)}",
+        "interaction_respond",
+    )
     if refused:
         return refused
     await _call("POST", f"/issues/{issue}/interactions/{interaction_id}/respond", json={"answers": answers})
@@ -911,6 +918,10 @@ CONFIRMING = {
     "issue_update", "approval_decision", "interaction_respond", "plan_confirm", "action_request_decision",
     "agent_resume", "routine_run",
 }
+# Confirming tools the policy may also set to allow: the client claude.ai cannot
+# ask (no elicitation), and these two are refused there otherwise (DMC-722).
+ALLOWABLE = {"agent_resume", "interaction_respond"}
+ACTIVE: dict[str, str] = {}
 
 
 def register(policy: dict[str, str]) -> list[str]:
@@ -919,11 +930,12 @@ def register(policy: dict[str, str]) -> list[str]:
         mode = policy.get(name, "deny")
         if mode == "deny":
             continue
-        if name in CONFIRMING and mode == "allow":
+        if name in CONFIRMING and mode == "allow" and name not in ALLOWABLE:
             raise SystemExit(f"policy.yaml: {name} can only be ask or deny")
         if mode == "ask" and name not in CONFIRMING:
             raise SystemExit(f"policy.yaml: {name} has no confirmation, use allow or deny")
         mcp.tool()(fn)
+        ACTIVE[name] = mode
         exposed.append(f"{name}={mode}")
     return exposed
 

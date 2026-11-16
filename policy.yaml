@@ -1,6 +1,7 @@
 # allow: runs. ask: requires your confirmation (MCP elicitation), refused if the
 # client cannot ask for it. deny or absent: tool not exposed.
-# Decision tools only accept ask or deny.
+# Decision tools only accept ask or deny, except agent_resume and
+# interaction_respond, which also accept allow (run without confirmation).
 tools:
   companies: allow
   attention: allow
@@ -25,11 +26,11 @@ tools:
   agent_wake: allow
   run_stop: allow
   approval_comment: allow
-  agent_resume: ask
+  agent_resume: allow
   agent_unblock: allow
   routine_run: ask
   approval_decision: ask
-  interaction_respond: ask
+  interaction_respond: allow
   plan_confirm: deny
   action_request_decision: deny
   sessions: allow
