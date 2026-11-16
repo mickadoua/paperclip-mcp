@@ -870,7 +870,10 @@ async def dependencies(company: str = "") -> str:
         projects = {p["id"]: p.get("name") or "?" for p in _items(await _call("GET", f"/companies/{cid}/projects")) if p.get("id")}
         # A blocker summary carries no project: the closed blockers are read one by one.
         for i in [i for i in keep.values() if "projectId" not in i][:40]:
-            i["projectId"] = (await _call("GET", f"/issues/{i['id']}")).get("projectId")
+            try:
+                i["projectId"] = (await _call("GET", f"/issues/{i['id']}")).get("projectId")
+            except ToolError:
+                i["projectId"] = None
 
         def ref(i: dict[str, Any]) -> str:
             return i.get("identifier") or str(i["id"])[:8]
@@ -882,7 +885,7 @@ async def dependencies(company: str = "") -> str:
             waits = owner if owner == "board" else _holder(owner.get("agentId"), owner.get("userId"), names) if isinstance(owner, dict) else "-"
             after = ",".join(ref(b) for b in i.get("blockedBy") or [] if b.get("id")) or "-"
             since = str(i.get("blockedTransitionAt") or i.get("updatedAt") or "")[:10] or "-"
-            project = _clip(projects.get(i.get("projectId") or "", "-"), 60).replace(" ", "_") or "-"
+            project = "_".join(_clip(projects.get(i.get("projectId") or "", "-"), 60).split()) or "-"
             title = _clip(i.get("title"), 200) or ("not readable" if i.get("locked") else "")
             out.append(
                 f"{ref(i)} [{i.get('status') or '?'}] by={_holder(i.get('assigneeAgentId'), i.get('assigneeUserId'), names)}"

@@ -1,6 +1,7 @@
 """`dependencies` against a mocked Paperclip API: python -m unittest discover tests"""
 
 import asyncio
+import copy
 import unittest
 
 from paperclip_mcp import server
@@ -29,8 +30,11 @@ class Dependencies(unittest.TestCase):
             if path.endswith("/agents"):
                 return AGENTS
             if path.endswith("/issues"):
-                return ISSUES
-            return CLOSED[path.rsplit("/", 1)[-1]]
+                return copy.deepcopy(ISSUES)
+            ref = path.rsplit("/", 1)[-1]
+            if ref not in CLOSED:
+                raise server.ToolError(f"Paperclip GET {path} -> 404 : not found")
+            return CLOSED[ref]
 
         async def company_ids(company):
             return [("c1", "DM-Consulting")]
@@ -56,6 +60,14 @@ class Dependencies(unittest.TestCase):
     def test_closed_blocker_read_once(self):
         asyncio.run(server.dependencies())
         self.assertEqual([c for c in self.calls if c.startswith("/issues/")], ["/issues/i9"])
+
+    def test_unreadable_blocker_has_no_project(self):
+        CLOSED.pop("i9")
+        try:
+            lines = asyncio.run(server.dependencies()).splitlines()
+        finally:
+            CLOSED["i9"] = {"id": "i9", "projectId": "p2"}
+        self.assertEqual(lines[2], "DMC-474 [done] by=- after=- waits=- since=- project=- · Modèles légaux")
 
 
 if __name__ == "__main__":
