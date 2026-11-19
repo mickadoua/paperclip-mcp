@@ -162,13 +162,26 @@ async def companies() -> str:
     return "\n".join(f"{c['name']} [{c.get('issuePrefix', '')}] {c['id']}" for c in rows)
 
 
+async def _attention_items(cid: str) -> list[dict[str, Any]]:
+    """Every attention card of a company. Without `all`, Paperclip returns the
+    first 50 only; the cursor is followed in case it still pages."""
+    items: list[dict[str, Any]] = []
+    params: dict[str, Any] = {"all": "true", "limit": 100}
+    while True:
+        data = await _call("GET", f"/companies/{cid}/attention", params=params)
+        items += data.get("items", [])
+        cursor = data.get("nextCursor")
+        if not cursor or cursor == params.get("cursor"):
+            return items
+        params = {**params, "cursor": cursor}
+
+
 async def attention(company: str = "") -> str:
     """What awaits a human: approvals, agent questions, reviews, failures.
     All companies if `company` is empty."""
     out = []
     for cid, name in await _company_ids(company):
-        data = await _call("GET", f"/companies/{cid}/attention")
-        items = data.get("items", [])
+        items = await _attention_items(cid)
         if not items:
             continue
         out.append(f"## {name} ({len(items)})")
