@@ -164,16 +164,10 @@ async def companies() -> str:
 
 async def _attention_items(cid: str) -> list[dict[str, Any]]:
     """Every attention card of a company. Without `all`, Paperclip returns the
-    first 50 only; the cursor is followed in case it still pages."""
-    items: list[dict[str, Any]] = []
-    params: dict[str, Any] = {"all": "true", "limit": 100}
-    while True:
-        data = await _call("GET", f"/companies/{cid}/attention", params=params)
-        items += data.get("items", [])
-        cursor = data.get("nextCursor")
-        if not cursor or cursor == params.get("cursor"):
-            return items
-        params = {**params, "cursor": cursor}
+    first 50 only. With `all` it returns the whole feed in one response and
+    refuses `limit` or `cursor` (400 "all cannot be combined with cursor or limit")."""
+    data = await _call("GET", f"/companies/{cid}/attention", params={"all": "true"})
+    return data.get("items", [])
 
 
 async def attention(company: str = "") -> str:

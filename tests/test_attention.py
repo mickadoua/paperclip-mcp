@@ -11,16 +11,24 @@ CARDS = [
 ]
 
 
+class Refused(Exception):
+    pass
+
+
 class Attention(unittest.TestCase):
     def setUp(self):
         self.calls = []
-        self.page = 50
 
+        # Same rules as GET /companies/{id}/attention on the NAS server (2026.1005.0):
+        # 50 cards per page by default, the whole feed with `all`, which refuses `limit` and `cursor`.
         async def call(method, path, params=None, **kw):
-            self.calls.append(dict(params or {}))
-            start = int((params or {}).get("cursor") or 0)
-            end = len(CARDS) if self.page is None else start + self.page
-            return {"items": CARDS[start:end], "nextCursor": str(end) if end < len(CARDS) else None}
+            params = dict(params or {})
+            self.calls.append(params)
+            if params.get("all") == "true":
+                if "limit" in params or "cursor" in params:
+                    raise Refused("400 all cannot be combined with cursor or limit")
+                return {"items": CARDS, "nextCursor": None}
+            return {"items": CARDS[:50], "nextCursor": "50"}
 
         async def company_ids(company):
             return [("c1", "DM-Consulting")]
@@ -31,30 +39,16 @@ class Attention(unittest.TestCase):
     def tearDown(self):
         server._call, server._company_ids = self.saved
 
-    def test_reads_every_page(self):
+    def test_reads_every_card(self):
         lines = asyncio.run(server.attention()).splitlines()
         self.assertEqual(lines[0], "## DM-Consulting (120)")
         self.assertEqual(len(lines), 121)
         self.assertEqual(lines[1], "- [issue_review] DMC-1 Carte 1 — revue")
         self.assertEqual(lines[-1], "- [issue_review] DMC-120 Carte 120 — revue")
-        self.assertEqual([c.get("cursor") for c in self.calls], [None, "50", "100"])
-        self.assertTrue(all(c["all"] == "true" for c in self.calls))
 
-    def test_all_in_one_response(self):
-        self.page = None
-        lines = asyncio.run(server.attention()).splitlines()
-        self.assertEqual(lines[0], "## DM-Consulting (120)")
-        self.assertEqual(len(self.calls), 1)
-
-    def test_repeated_cursor_stops(self):
-        async def call(method, path, params=None, **kw):
-            self.calls.append(dict(params or {}))
-            return {"items": CARDS[:50], "nextCursor": "same"}
-
-        server._call = call
-        lines = asyncio.run(server.attention()).splitlines()
-        self.assertEqual(len(self.calls), 2)
-        self.assertEqual(lines[0], "## DM-Consulting (100)")
+    def test_one_call_with_all_only(self):
+        asyncio.run(server.attention())
+        self.assertEqual(self.calls, [{"all": "true"}])
 
 
 if __name__ == "__main__":
